@@ -11,7 +11,6 @@
 (define-constant err-unauthorized (err u104))
 (define-constant err-property-not-active (err u105))
 (define-constant err-invalid-amount (err u106))
-(define-constant err-list-full (err u107))
 
 ;; Define data structures
 (define-map properties
@@ -39,13 +38,13 @@
   { total-revenue: uint, last-distribution: uint }
 )
 
+;; Use a map instead of a list to track property IDs
+(define-map property-ids uint bool)
+
 ;; Define data variables
 (define-data-var property-nonce uint u0)
 (define-data-var total-properties uint u0)
 (define-data-var total-investors uint u0)
-
-;; Define a list to track all property IDs with max capacity of 100
-(define-data-var all-property-ids (list 100 uint) (list))
 
 ;; Read-only functions
 
@@ -72,30 +71,9 @@
   )
 )
 
-;; Get user's portfolio (all owned properties)
-;; This is a placeholder since we can't directly filter a list in Clarity based on ownership
-;; A real implementation would need to track ownership on-chain differently
-(define-read-only (get-user-properties (user principal))
-  (var-get all-property-ids)
-)
-
-;; Helper function to add property ID to the tracking list
-(define-private (add-property-to-list (property-id uint))
-  (let ((current-list (var-get all-property-ids))
-        (current-length (len current-list)))
-    (asserts! (< current-length u100) err-list-full)
-    
-    ;; At this point we know the list has room for one more item
-    (let ((new-list (as-max-len? (append current-list property-id) u100)))
-      (if (is-some new-list)
-        (begin
-          (var-set all-property-ids (unwrap-panic new-list))
-          (ok true)
-        )
-        (err err-list-full)
-      )
-    )
-  )
+;; Check if a property ID exists
+(define-read-only (property-exists (property-id uint))
+  (default-to false (map-get? property-ids property-id))
 )
 
 ;; Calculate user's share of revenue for a property
@@ -133,12 +111,10 @@
   (let
     (
       (property-id (+ (var-get property-nonce) u1))
-      (current-list-length (len (var-get all-property-ids)))
     )
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (> total-shares u0) err-invalid-amount)
     (asserts! (> price-per-share u0) err-invalid-amount)
-    (asserts! (< current-list-length u100) err-list-full)
     
     (map-set properties
       { property-id: property-id }
@@ -160,8 +136,8 @@
       { total-revenue: u0, last-distribution: block-height }
     )
     
-    ;; Add to property ID list for tracking
-    (try! (add-property-to-list property-id))
+    ;; Track the property ID
+    (map-set property-ids property-id true)
     
     (var-set property-nonce property-id)
     (var-set total-properties (+ (var-get total-properties) u1))
