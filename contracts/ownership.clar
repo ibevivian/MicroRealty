@@ -11,6 +11,7 @@
 (define-constant err-unauthorized (err u104))
 (define-constant err-property-not-active (err u105))
 (define-constant err-invalid-amount (err u106))
+(define-constant err-list-full (err u107))
 
 ;; Define data structures
 (define-map properties
@@ -43,6 +44,9 @@
 (define-data-var total-properties uint u0)
 (define-data-var total-investors uint u0)
 
+;; Define a list to track all property IDs with max capacity of 100
+(define-data-var all-property-ids (list 100 uint) (list))
+
 ;; Read-only functions
 
 ;; Get property details
@@ -60,46 +64,37 @@
   (map-get? property-revenues { property-id: property-id })
 )
 
+;; Check if a user has shares in a property
+(define-read-only (has-shares (property-id uint) (user principal))
+  (match (get-ownership property-id user)
+    owner-data (> (get shares owner-data) u0)
+    false
+  )
+)
+
 ;; Get user's portfolio (all owned properties)
+;; This is a placeholder since we can't directly filter a list in Clarity based on ownership
+;; A real implementation would need to track ownership on-chain differently
 (define-read-only (get-user-properties (user principal))
-  (filter owned-by-user (map get-property (get-all-properties)))
-  
-  (define-private (owned-by-user (property (optional {
-    name: (string-ascii 100),
-    description: (string-ascii 500),
-    location: (string-ascii 200),
-    total-shares: uint,
-    available-shares: uint,
-    price-per-share: uint,
-    total-revenue: uint,
-    is-active: bool,
-    date-listed: uint
-  })))
-    (match (get-ownership (get property-id property) user)
-      share-info (> (get shares share-info) u0)
-      false
+  (var-get all-property-ids)
+)
+
+;; Helper function to add property ID to the tracking list
+(define-private (add-property-to-list (property-id uint))
+  (let ((current-list (var-get all-property-ids))
+        (current-length (len current-list)))
+    (asserts! (< current-length u100) err-list-full)
+    
+    ;; At this point we know the list has room for one more item
+    (let ((new-list (as-max-len? (append current-list property-id) u100)))
+      (if (is-some new-list)
+        (begin
+          (var-set all-property-ids (unwrap-panic new-list))
+          (ok true)
+        )
+        (err err-list-full)
+      )
     )
-  )
-  
-  (define-private (get-property-id (property (optional {
-    name: (string-ascii 100),
-    description: (string-ascii 500),
-    location: (string-ascii 200),
-    total-shares: uint,
-    available-shares: uint,
-    price-per-share: uint,
-    total-revenue: uint,
-    is-active: bool,
-    date-listed: uint
-  })))
-    (match property
-      actual-property (get property-id actual-property)
-      u0
-    )
-  )
-  
-  (define-private (get-all-properties)
-    (list u1 u2 u3) ;; This is a placeholder, ideally you would have a way to track all property IDs
   )
 )
 
@@ -109,35 +104,21 @@
     (property (get-property property-id))
     (user-ownership (get-ownership property-id user))
   )
-    (match (assemble-values property user-ownership)
-      values (/ (* (get shares values) (get total-revenue values)) (get total-shares values))
+    (match property
+      p (match user-ownership
+          o (/ (* (get shares o) (get total-revenue p)) (get total-shares p))
+          u0
+        )
       u0
     )
   )
-  
-  (define-private (assemble-values (property (optional {
-    name: (string-ascii 100),
-    description: (string-ascii 500),
-    location: (string-ascii 200),
-    total-shares: uint,
-    available-shares: uint,
-    price-per-share: uint,
-    total-revenue: uint,
-    is-active: bool,
-    date-listed: uint
-  })) (ownership (optional { shares: uint, revenue-claimed: uint })))
-    (match property
-      p (match ownership
-          o {
-            shares: (get shares o),
-            total-revenue: (get total-revenue p),
-            total-shares: (get total-shares p)
-          }
-          none
-        )
-      none
-    )
-  )
+)
+
+;; Helper function to check if a principal is approved as property manager
+(define-private (is-approved-manager (user principal) (property-id uint))
+  ;; This would check if the user is in a list of approved managers for this property
+  ;; For now, returning false as we haven't implemented manager approval yet
+  false
 )
 
 ;; Public functions
@@ -152,10 +133,12 @@
   (let
     (
       (property-id (+ (var-get property-nonce) u1))
+      (current-list-length (len (var-get all-property-ids)))
     )
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (> total-shares u0) err-invalid-amount)
     (asserts! (> price-per-share u0) err-invalid-amount)
+    (asserts! (< current-list-length u100) err-list-full)
     
     (map-set properties
       { property-id: property-id }
@@ -176,6 +159,9 @@
       { property-id: property-id }
       { total-revenue: u0, last-distribution: block-height }
     )
+    
+    ;; Add to property ID list for tracking
+    (try! (add-property-to-list property-id))
     
     (var-set property-nonce property-id)
     (var-set total-properties (+ (var-get total-properties) u1))
@@ -264,13 +250,6 @@
     )
     
     (ok true)
-  )
-  
-  ;; Helper function to check if a principal is approved as property manager
-  (define-private (is-approved-manager (user principal) (property-id uint))
-    ;; This would check if the user is in a list of approved managers for this property
-    ;; For now, returning false as we haven't implemented manager approval yet
-    false
   )
 )
 
