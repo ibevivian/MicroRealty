@@ -11,6 +11,8 @@
 (define-constant err-unauthorized (err u104))
 (define-constant err-property-not-active (err u105))
 (define-constant err-invalid-amount (err u106))
+(define-constant err-null-string (err u107))
+(define-constant err-invalid-property-id (err u108))
 
 ;; Define data structures
 (define-map properties
@@ -45,6 +47,31 @@
 (define-data-var property-nonce uint u0)
 (define-data-var total-properties uint u0)
 (define-data-var total-investors uint u0)
+
+;; Enhanced input validation helper function that returns a sanitized property ID
+(define-private (validate-property-input (pid uint))
+  (begin
+    ;; Check if property ID is within valid range
+    (asserts! (< pid (var-get total-properties)) err-invalid-property-id)
+    ;; Check if property exists in our registry
+    (asserts! (default-to false (map-get? property-ids pid)) err-property-not-found)
+    ;; Return the validated property ID
+    pid
+  )
+)
+
+;; Helper function to verify a property exists and is active
+(define-private (verify-active-property (pid uint))
+  (let ((prop (unwrap! (map-get? properties { property-id: pid }) err-property-not-found)))
+    (asserts! (get is-active prop) err-property-not-active)
+    prop))
+
+;; Helper function to check if a principal is approved as property manager
+(define-private (is-approved-manager (user principal) (pid uint))
+  ;; This would check if the user is in a list of approved managers for this property
+  ;; For now, returning false as we haven't implemented manager approval yet
+  false
+)
 
 ;; Read-only functions
 
@@ -92,224 +119,220 @@
   )
 )
 
-;; Helper function to check if a principal is approved as property manager
-(define-private (is-approved-manager (user principal) (property-id uint))
-  ;; This would check if the user is in a list of approved managers for this property
-  ;; For now, returning false as we haven't implemented manager approval yet
-  false
+;; Create a new property (only by contract owner)
+(define-public (create-property 
+  (name (string-ascii 100)) 
+  (description (string-ascii 500)) 
+  (location (string-ascii 200))
+  (total-shares uint)
+  (price-per-share uint)
 )
-
-;; Public functions
-
-;; Add a new property to the platform
-(define-public (list-property 
-    (name (string-ascii 100)) 
-    (description (string-ascii 500))
-    (location (string-ascii 200))
-    (total-shares uint)
-    (price-per-share uint))
-  (let
-    (
-      (property-id (+ (var-get property-nonce) u1))
-    )
+  (begin
+    ;; Validate inputs
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (> total-shares u0) err-invalid-amount)
     (asserts! (> price-per-share u0) err-invalid-amount)
-    
-    (map-set properties
-      { property-id: property-id }
-      {
-        name: name,
-        description: description,
-        location: location,
-        total-shares: total-shares,
-        available-shares: total-shares,
-        price-per-share: price-per-share,
-        total-revenue: u0,
-        is-active: true,
-        date-listed: block-height
-      }
+    (asserts! (not (is-eq name "")) err-null-string)
+    (asserts! (not (is-eq location "")) err-null-string)
+    (asserts! (not (is-eq description "")) err-null-string)
+
+    ;; Increment property nonce and total properties
+    (let ((new-property-id (+ (var-get property-nonce) u1)))
+      ;; Add property to properties map
+      (map-set properties 
+        { property-id: new-property-id }
+        {
+          name: name,
+          description: description,
+          location: location,
+          total-shares: total-shares,
+          available-shares: total-shares,
+          price-per-share: price-per-share,
+          total-revenue: u0,
+          is-active: true,
+          date-listed: block-height
+        }
+      )
+
+      ;; Mark property ID as existing
+      (map-set property-ids new-property-id true)
+
+      ;; Initialize property revenues
+      (map-set property-revenues
+        { property-id: new-property-id }
+        { 
+          total-revenue: u0, 
+          last-distribution: block-height 
+        }
+      )
+
+      ;; Update nonce and total properties
+      (var-set property-nonce new-property-id)
+      (var-set total-properties new-property-id)
+
+      (ok new-property-id)
     )
-    
-    (map-set property-revenues
-      { property-id: property-id }
-      { total-revenue: u0, last-distribution: block-height }
-    )
-    
-    ;; Track the property ID
-    (map-set property-ids property-id true)
-    
-    (var-set property-nonce property-id)
-    (var-set total-properties (+ (var-get total-properties) u1))
-    
-    (ok property-id)
   )
 )
 
 ;; Purchase shares of a property
-(define-public (purchase-shares (property-id uint) (num-shares uint))
-  (let
-    (
-      (property (unwrap! (get-property property-id) err-property-not-found))
-      (price-per-share (get price-per-share property))
-      (available-shares (get available-shares property))
-      (is-active (get is-active property))
-      (total-cost (* num-shares price-per-share))
-      (user-ownership (default-to { shares: u0, revenue-claimed: u0 } 
-                      (get-ownership property-id tx-sender)))
-    )
-    
-    ;; Verify property is active and has enough shares
-    (asserts! is-active err-property-not-active)
-    (asserts! (<= num-shares available-shares) err-insufficient-tokens)
+(define-public (purchase-shares (pid uint) (num-shares uint))
+  (begin
+    ;; Validate inputs and ensure property ID is valid
+    (asserts! (< pid (var-get total-properties)) err-invalid-property-id)
+    (asserts! (default-to false (map-get? property-ids pid)) err-property-not-found)
     (asserts! (> num-shares u0) err-invalid-amount)
     
-    ;; Transfer STX from buyer to contract
-    (try! (stx-transfer? total-cost tx-sender contract-owner))
-    
-    ;; Update property available shares
-    (map-set properties
-      { property-id: property-id }
-      (merge property { available-shares: (- available-shares num-shares) })
+    ;; Use the validated property ID
+    (let ((property (unwrap! (map-get? properties { property-id: pid }) err-property-not-found)))
+      ;; Check if property is active
+      (asserts! (get is-active property) err-property-not-active)
+      
+      (let ((price-per-share (get price-per-share property))
+            (available-shares (get available-shares property))
+            (total-cost (* num-shares price-per-share))
+            (user-ownership (default-to { shares: u0, revenue-claimed: u0 } 
+                          (get-ownership pid tx-sender))))
+        
+        ;; Verify enough shares available
+        (asserts! (<= num-shares available-shares) err-insufficient-tokens)
+        
+        ;; Transfer STX from buyer to contract
+        (try! (stx-transfer? total-cost tx-sender contract-owner))
+        
+        ;; Update property available shares
+        (map-set properties
+          { property-id: pid }
+          (merge property { available-shares: (- available-shares num-shares) })
+        )
+        
+        ;; Update user ownership
+        (map-set ownership
+          { property-id: pid, owner: tx-sender }
+          { 
+            shares: (+ (get shares user-ownership) num-shares),
+            revenue-claimed: (get revenue-claimed user-ownership)
+          }
+        )
+        
+        ;; Increment total investors if this is their first purchase
+        (if (is-eq (get shares user-ownership) u0)
+          (var-set total-investors (+ (var-get total-investors) u1))
+          true
+        )
+        
+        (ok true)
+      )
     )
-    
-    ;; Update user ownership
-    (map-set ownership
-      { property-id: property-id, owner: tx-sender }
-      { 
-        shares: (+ (get shares user-ownership) num-shares),
-        revenue-claimed: (get revenue-claimed user-ownership)
-      }
-    )
-    
-    ;; Increment total investors if this is their first purchase
-    (if (is-eq (get shares user-ownership) u0)
-      (var-set total-investors (+ (var-get total-investors) u1))
-      true
-    )
-    
-    (ok true)
   )
 )
 
 ;; Add revenue to a property
-(define-public (add-revenue (property-id uint) (amount uint))
-  (let
-    (
-      (property (unwrap! (get-property property-id) err-property-not-found))
-      (property-revenue (unwrap! (get-property-revenue property-id) err-property-not-found))
-      (is-active (get is-active property))
-      (current-total-revenue (get total-revenue property))
-    )
-    
-    ;; Verify property is active
-    (asserts! is-active err-property-not-active)
+(define-public (add-revenue (pid uint) (amount uint))
+  (begin
+    ;; Validate inputs and ensure property ID is valid
+    (asserts! (< pid (var-get total-properties)) err-invalid-property-id)
+    (asserts! (default-to false (map-get? property-ids pid)) err-property-not-found)
     (asserts! (> amount u0) err-invalid-amount)
-    (asserts! (or (is-eq tx-sender contract-owner) (is-approved-manager tx-sender property-id)) err-unauthorized)
     
-    ;; Transfer STX to contract
-    (try! (stx-transfer? amount tx-sender contract-owner))
-    
-    ;; Update property total revenue
-    (map-set properties
-      { property-id: property-id }
-      (merge property { total-revenue: (+ current-total-revenue amount) })
+    ;; Use the validated property ID
+    (let ((property (unwrap! (map-get? properties { property-id: pid }) err-property-not-found)))
+      ;; Check if property is active
+      (asserts! (get is-active property) err-property-not-active)
+      
+      (let ((property-revenue (unwrap! (get-property-revenue pid) err-property-not-found))
+            (current-total-revenue (get total-revenue property)))
+        
+        ;; Verify authorization
+        (asserts! (or (is-eq tx-sender contract-owner) 
+                      (is-approved-manager tx-sender pid)) 
+                  err-unauthorized)
+        
+        ;; Transfer STX to contract
+        (try! (stx-transfer? amount tx-sender contract-owner))
+        
+        ;; Update property total revenue
+        (map-set properties
+          { property-id: pid }
+          (merge property { total-revenue: (+ current-total-revenue amount) })
+        )
+        
+        ;; Update property revenue record
+        (map-set property-revenues
+          { property-id: pid }
+          { 
+            total-revenue: (+ (get total-revenue property-revenue) amount),
+            last-distribution: block-height
+          }
+        )
+        
+        (ok true)
+      )
     )
-    
-    ;; Update property revenue record
-    (map-set property-revenues
-      { property-id: property-id }
-      { 
-        total-revenue: (+ (get total-revenue property-revenue) amount),
-        last-distribution: block-height
-      }
-    )
-    
-    (ok true)
   )
 )
 
 ;; Claim revenue share as an investor
-(define-public (claim-revenue (property-id uint))
-  (let
-    (
-      (property (unwrap! (get-property property-id) err-property-not-found))
-      (user-ownership (unwrap! (get-ownership property-id tx-sender) err-insufficient-tokens))
-      (user-shares (get shares user-ownership))
-      (property-total-shares (get total-shares property))
-      (property-total-revenue (get total-revenue property))
-      (revenue-already-claimed (get revenue-claimed user-ownership))
-      (entitled-total-revenue (/ (* user-shares property-total-revenue) property-total-shares))
-      (claimable-amount (- entitled-total-revenue revenue-already-claimed))
+(define-public (claim-revenue (pid uint))
+  (begin
+    ;; Validate property ID is valid
+    (asserts! (< pid (var-get total-properties)) err-invalid-property-id)
+    (asserts! (default-to false (map-get? property-ids pid)) err-property-not-found)
+    
+    ;; Use the validated property ID
+    (let ((property (unwrap! (map-get? properties { property-id: pid }) err-property-not-found)))
+      ;; Check if property is active
+      (asserts! (get is-active property) err-property-not-active)
+      
+      (let ((user-ownership (unwrap! (get-ownership pid tx-sender) err-insufficient-tokens)))
+        (let ((user-shares (get shares user-ownership))
+              (property-total-shares (get total-shares property))
+              (property-total-revenue (get total-revenue property))
+              (revenue-already-claimed (get revenue-claimed user-ownership)))
+          
+          (let ((entitled-total-revenue (/ (* user-shares property-total-revenue) property-total-shares))
+                (claimable-amount (- entitled-total-revenue revenue-already-claimed)))
+            
+            ;; Verify user owns shares and there's revenue to claim
+            (asserts! (> user-shares u0) err-insufficient-tokens)
+            (asserts! (> claimable-amount u0) err-invalid-amount)
+            
+            ;; Transfer revenue to user
+            (try! (as-contract (stx-transfer? claimable-amount contract-owner tx-sender)))
+            
+            ;; Update user's claimed revenue
+            (map-set ownership
+              { property-id: pid, owner: tx-sender }
+              { 
+                shares: user-shares,
+                revenue-claimed: entitled-total-revenue 
+              }
+            )
+            
+            (ok claimable-amount)
+          )
+        )
+      )
     )
-    
-    ;; Verify user owns shares and there's revenue to claim
-    (asserts! (> user-shares u0) err-insufficient-tokens)
-    (asserts! (> claimable-amount u0) err-invalid-amount)
-    
-    ;; Transfer revenue to user
-    (try! (as-contract (stx-transfer? claimable-amount contract-owner tx-sender)))
-    
-    ;; Update user's claimed revenue
-    (map-set ownership
-      { property-id: property-id, owner: tx-sender }
-      (merge user-ownership { revenue-claimed: entitled-total-revenue })
-    )
-    
-    (ok claimable-amount)
   )
 )
 
-;; Transfer shares to another user
-(define-public (transfer-shares (property-id uint) (recipient principal) (num-shares uint))
-  (let
-    (
-      (property (unwrap! (get-property property-id) err-property-not-found))
-      (sender-ownership (unwrap! (get-ownership property-id tx-sender) err-insufficient-tokens))
-      (sender-shares (get shares sender-ownership))
-      (recipient-ownership (default-to { shares: u0, revenue-claimed: u0 } 
-                           (get-ownership property-id recipient)))
-      (recipient-revenue-claimed (get revenue-claimed recipient-ownership))
-      (recipient-shares (get shares recipient-ownership))
-      (property-total-revenue (get total-revenue property))
-      (property-total-shares (get total-shares property))
-    )
+;; Deactivate a property (only by contract owner)
+(define-public (deactivate-property (pid uint))
+  (begin
+    ;; Validate inputs and ownership
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     
-    ;; Verify sender has enough shares
-    (asserts! (>= sender-shares num-shares) err-insufficient-tokens)
-    (asserts! (> num-shares u0) err-invalid-amount)
+    ;; Validate property ID is valid
+    (asserts! (< pid (var-get total-properties)) err-invalid-property-id)
+    (asserts! (default-to false (map-get? property-ids pid)) err-property-not-found)
     
-    ;; Calculate proportional revenue claimed for transferred shares
-    (let
-      (
-        (revenue-per-share (if (> property-total-shares u0)
-                             (/ property-total-revenue property-total-shares)
-                             u0))
-        (transferred-revenue-claim (* revenue-per-share num-shares))
-      )
-      
-      ;; Update sender ownership
-      (map-set ownership
-        { property-id: property-id, owner: tx-sender }
-        { 
-          shares: (- sender-shares num-shares),
-          revenue-claimed: (- (get revenue-claimed sender-ownership) transferred-revenue-claim)
-        }
-      )
-      
-      ;; Update recipient ownership
-      (map-set ownership
-        { property-id: property-id, owner: recipient }
-        { 
-          shares: (+ recipient-shares num-shares),
-          revenue-claimed: (+ recipient-revenue-claimed transferred-revenue-claim)
-        }
-      )
-      
-      ;; Increment total investors if this is recipient's first shares
-      (if (is-eq recipient-shares u0)
-        (var-set total-investors (+ (var-get total-investors) u1))
-        true
+    ;; Use the validated property ID
+    (let ((property (unwrap! (map-get? properties { property-id: pid }) err-property-not-found)))
+      ;; Update property status
+      (map-set properties
+        { property-id: pid }
+        (merge property { is-active: false })
       )
       
       (ok true)
@@ -317,38 +340,25 @@
   )
 )
 
-;; Deactivate a property (only by contract owner)
-(define-public (deactivate-property (property-id uint))
-  (let
-    (
-      (property (unwrap! (get-property property-id) err-property-not-found))
-    )
-    
-    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-    
-    (map-set properties
-      { property-id: property-id }
-      (merge property { is-active: false })
-    )
-    
-    (ok true)
-  )
-)
-
 ;; Reactivate a property (only by contract owner)
-(define-public (reactivate-property (property-id uint))
-  (let
-    (
-      (property (unwrap! (get-property property-id) err-property-not-found))
-    )
-    
+(define-public (reactivate-property (pid uint))
+  (begin
+    ;; Validate inputs and ownership
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     
-    (map-set properties
-      { property-id: property-id }
-      (merge property { is-active: true })
-    )
+    ;; Validate property ID is valid
+    (asserts! (< pid (var-get total-properties)) err-invalid-property-id)
+    (asserts! (default-to false (map-get? property-ids pid)) err-property-not-found)
     
-    (ok true)
+    ;; Use the validated property ID
+    (let ((property (unwrap! (map-get? properties { property-id: pid }) err-property-not-found)))
+      ;; Update property status
+      (map-set properties
+        { property-id: pid }
+        (merge property { is-active: true })
+      )
+      
+      (ok true)
+    )
   )
 )
