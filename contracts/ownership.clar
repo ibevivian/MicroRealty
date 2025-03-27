@@ -48,24 +48,6 @@
 (define-data-var total-properties uint u0)
 (define-data-var total-investors uint u0)
 
-;; Enhanced input validation helper function that returns a sanitized property ID
-(define-private (validate-property-input (pid uint))
-  (begin
-    ;; Check if property ID is within valid range
-    (asserts! (< pid (var-get total-properties)) err-invalid-property-id)
-    ;; Check if property exists in our registry
-    (asserts! (default-to false (map-get? property-ids pid)) err-property-not-found)
-    ;; Return the validated property ID
-    pid
-  )
-)
-
-;; Helper function to verify a property exists and is active
-(define-private (verify-active-property (pid uint))
-  (let ((prop (unwrap! (map-get? properties { property-id: pid }) err-property-not-found)))
-    (asserts! (get is-active prop) err-property-not-active)
-    prop))
-
 ;; Helper function to check if a principal is approved as property manager
 (define-private (is-approved-manager (user principal) (pid uint))
   ;; This would check if the user is in a list of approved managers for this property
